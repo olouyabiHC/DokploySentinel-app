@@ -1,4 +1,4 @@
-"""API Router for Webhooks, Multi-Server Agent Sync, Health, Container Status, and Uptime."""
+"""API Router for Webhooks, Multi-Server Agent Sync, Interactive Telegram Bot, Mutes, and Uptime."""
 
 import logging
 from typing import Any, Dict, List, Optional
@@ -11,6 +11,9 @@ from src.analyzers.metrics_aggregator import metrics_aggregator
 from src.analyzers.log_parser import LogParser
 from src.collectors.uptime_prober import uptime_prober
 from src.scheduler.digest_job import digest_scheduler
+from src.services.mutes_manager import mutes_manager
+from src.services.telegram_bot_handler import telegram_bot_handler
+from src.services.ai_analyzer import ai_analyzer
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +62,20 @@ class LogIngestRequest(BaseModel):
     payload: Optional[Dict[str, Any]] = None
 
 
+class MuteCreateRequest(BaseModel):
+    pattern: str = Field(..., description="Nom de conteneur ou motif (ex: wordpress, celery)")
+    duration_minutes: Optional[int] = Field(None, description="Durée en minutes (None = permanent)")
+    reason: str = "Manuel via API"
+    server_name: Optional[str] = None
+
+
+class AIDiagnoseRequest(BaseModel):
+    container_name: str = "test-app"
+    reason: str = "Exception"
+    details: str = ""
+    server_name: Optional[str] = None
+
+
 def _verify_secret_key(secret: Optional[str]):
     if not settings.debug and secret != settings.secret_key:
         raise HTTPException(status_code=403, detail="Clé secrète invalide ou manquante")
@@ -74,8 +91,102 @@ async def health_check():
         "app": settings.app_name,
         "env": settings.app_env,
         "server_name": settings.server_name,
-        "version": "1.1.0",
+        "version": "2.0.0",
     }
+
+
+# ── Interactive Telegram Bot Webhook ────────────────────────────────────────
+
+@router.post("/telegram/webhook")
+async def telegram_webhook(
+    request: Request,
+    secret_token: Optional[str] = Header(None, alias="X-Telegram-Bot-Api-Secret-Token"),
+):
+    """Réception des événements et commandes Telegram envoyés par le Webhook officiel Telegram."""
+    # Vérification optionnelle du token de sécurité Telegram
+    if settings.telegram_webhook_secret and secret_token:
+        if secret_token != settings.telegram_webhook_secret and not settings.debug:
+            raise HTTPException(status_code=403, detail="Token de sécurité Telegram invalide")
+
+    try:
+        update_data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Corps de requête JSON invalide")
+
+    # Traitement asynchrone par le gestionnaire Telegram interactif
+    await telegram_bot_handler.process_update(update_data)
+    return {"ok": True}
+
+
+@router.post("/telegram/setup-webhook")
+async def setup_telegram_webhook(
+    webhook_url: Optional[str] = Query(None, description="URL publique du webhook (ex: https://sentinel.lekyn.com/api/v1/telegram/webhook)"),
+    secret: Optional[str] = Header(None, alias="X-Secret-Key"),
+):
+    """Configure automatiquement le Webhook auprès de Telegram."""
+    _verify_secret_key(secret)
+    target_url = webhook_url or settings.telegram_webhook_url or "https://sentinel.lekyn.com/api/v1/telegram/webhook"
+    success = await telegram_bot_handler.telegram.set_webhook(
+        webhook_url=target_url,
+        secret_token=settings.telegram_webhook_secret,
+    )
+    if success:
+        return {"status": "success", "message": f"Webhook Telegram configuré avec succès sur {target_url}"}
+    raise HTTPException(status_code=500, detail="Échec de configuration du Webhook auprès de Telegram")
+
+
+# ── Gestionnaire Dynamique des Sourdines (Mutes) ────────────────────────────
+
+@router.get("/mutes")
+async def get_active_mutes():
+    """Retourne la liste des conteneurs ou patterns actuellement en sourdine."""
+    return {"active_mutes": mutes_manager.get_active_mutes()}
+
+
+@router.post("/mutes")
+async def create_mute_rule(
+    payload: MuteCreateRequest,
+    secret: Optional[str] = Header(None, alias="X-Secret-Key"),
+):
+    """Crée une nouvelle règle de sourdine pour filtrer les alertes."""
+    _verify_secret_key(secret)
+    rule = mutes_manager.mute(
+        pattern=payload.pattern,
+        duration_minutes=payload.duration_minutes,
+        reason=payload.reason,
+        server_name=payload.server_name,
+    )
+    return {"status": "success", "rule": rule.to_dict()}
+
+
+@router.delete("/mutes/{pattern}")
+async def delete_mute_rule(
+    pattern: str,
+    secret: Optional[str] = Header(None, alias="X-Secret-Key"),
+):
+    """Supprime une règle de sourdine active."""
+    _verify_secret_key(secret)
+    if mutes_manager.unmute(pattern):
+        return {"status": "success", "message": f"Sourdine levée pour '{pattern}'"}
+    raise HTTPException(status_code=404, detail=f"Aucune sourdine active trouvée pour '{pattern}'")
+
+
+# ── Diagnostic IA à la demande ──────────────────────────────────────────────
+
+@router.post("/ai/diagnose")
+async def ai_diagnose_endpoint(
+    payload: AIDiagnoseRequest,
+    secret: Optional[str] = Header(None, alias="X-Secret-Key"),
+):
+    """Génère un diagnostic IA pour une erreur ou stacktrace donnée."""
+    _verify_secret_key(secret)
+    result = await ai_analyzer.analyze_incident(
+        container_name=payload.container_name,
+        reason=payload.reason,
+        details=payload.details,
+        server_name=payload.server_name or settings.server_name,
+    )
+    return {"status": "success", "diagnosis": result}
 
 
 # ── Endpoints Multi-Serveurs & Synchronisation Agent ─────────────────────────

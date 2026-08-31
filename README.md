@@ -1,39 +1,39 @@
-# 🛡️ DokploySentinel
+# 🛡️ DokploySentinel 2.0
 
-**Système d'Observabilité Centralisé, Surveillance Multi-Serveurs (Multi-VPS), Logs & Digest Périodique pour Dokploy.**
+**Copilote DevOps & Système d'Observabilité Centralisé Intelligent pour Dokploy.**
 
-DokploySentinel est un microservice autonome et extensible composé de :
-1. **Un Hub Central** (`DokploySentinel`) hébergé sur votre VPS principal (`https://sentinel.lekyn.com`), qui centralise les métriques, sondes Uptime/SSL et expédie les alertes et rapports sur **Telegram**, **Discord**, **WhatsApp** et **Email**.
-2. **Des Sentinel-Agents Satellites** légers (< 30 Mo) déployés en 1 clic sur les VPS de vos clients ou vos autres serveurs Dokploy.
+DokploySentinel 2.0 transforme votre groupe Telegram en un **centre de contrôle interactif complet** propulsé par l'IA :
+1. **Un Hub Central 2.0** (`DokploySentinel`) hébergé sur votre VPS principal (`https://sentinel.lekyn.com`), équipé d'un **Bot Telegram Interactif bidirectionnel**, d'un **gestionnaire de sourdines (Mutes)** et d'un **moteur de diagnostic IA (Smart RCA)**.
+2. **Des Sentinel-Agents Satellites** légers (< 30 Mo) déployés en 1 clic sur les VPS de vos clients pour relayer métriques, logs et alertes en temps réel.
 
 ---
 
-## 🌟 Fonctionnalités Principales
+## 🌟 Nouvelles Fonctionnalités 2.0
 
-1. **Surveillance Multi-Serveurs (Multi-VPS & Multi-Clients) :**
-   - Centralisation de tous vos serveurs VPS distants dans un seul groupe Telegram.
-   - Suivi en direct du statut en ligne/hors-ligne de chaque serveur via **Heartbeat** avec alerte de signal perdu.
-   - Suivi de la charge hôte (CPU %, RAM %, Espace Disque %).
+### 1. 🤖 Bot Telegram Interactif & Commandes en Direct
+Envoyez des commandes directement dans votre groupe Telegram :
+- **`/status`** : Vue d'ensemble en direct de tous les VPS et de la santé globale.
+- **`/servers`** : Liste des serveurs VPS connectés et charge hôte (CPU / RAM / Disque).
+- **`/containers`** : Liste complète des conteneurs sous surveillance.
+- **`/mute <motif> [durée]`** : Coupe instantanément les alertes d'un conteneur ou d'une techno sans toucher au serveur *(ex: `/mute wordpress 2h` ou `/mute all 30m`)*.
+- **`/unmute <motif>`** : Réactive les alertes pour un motif.
+- **`/mutes`** : Affiche les sourdines actuellement actives et le temps restant.
+- **`/logs <nom_conteneur>`** : Récupère les 25 dernières lignes de logs d'un conteneur en direct.
+- **`/restart <nom_conteneur>`** : Redémarre un conteneur à distance depuis Telegram avec confirmation.
+- **`/ai <nom_conteneur>`** : Lance un diagnostic intelligent par IA sur les dernières erreurs d'un projet.
+- **`/digest`** : Déclenche manuellement l'envoi du rapport consolidé.
+- **`/help`** : Affiche le menu interactif.
 
-2. **Surveillance des Logs & Formats Multiples :**
-   - Écoute automatique des conteneurs via le socket Docker (`/var/run/docker.sock:ro`).
-   - Parsing automatique des logs texte (Nginx, Traefik, Apache, Gunicorn, Uvicorn, Django) et **JSON structuré** (Winston, Pino, Structlog, Zap).
-   - Détection des codes d'erreurs HTTP (`500`, `502`, `504`, `429`).
-   - Détection des latences anormales et requêtes lentes (> 2000 ms).
-   - Détection des traces d'erreurs critiques (`Traceback`, `Fatal error`, `panic`, `OOMKilled`, échecs DB).
+### 2. ⚡ Boutons d'Action Rapide sous chaque Alerte (Inline Keyboards)
+Chaque alerte critique reçue sur Telegram propose des actions en 1 clic :
+- `[ 🔇 Muter 2h ]` : Met en sourdine le conteneur concerné.
+- `[ 📋 Derniers logs ]` : Extrait et affiche les logs récents.
+- `[ 🔄 Redémarrer ]` : Demande confirmation et redémarre le conteneur défaillant.
+- `[ 🧠 Diagnostic IA ]` : Analyse la stacktrace et affiche la cause et la solution.
 
-3. **Sondes Uptime Externes & Validité SSL :**
-   - Test périodique (toutes les 60s) des URLs publiques des sites clients.
-   - Mesure de disponibilité (UP/DOWN) et de latence.
-   - Surveillance proactive des certificats SSL (alerte si expiration < 7 jours).
-
-4. **Alertes Immédiates & Protection Anti-Spam :**
-   - Notification instantanée en cas de crash (`die`), dépassement de mémoire (`oom`), conteneur `unhealthy` ou exception critique.
-   - Système de cooldown configurable (`ALERT_COOLDOWN_SECONDS`) pour éviter d'être submergé en cas de crash loop.
-
-5. **Rapport de Santé Périodique (Digest toutes les 2h ou 3h) :**
-   - Synthèse consolidée regroupée par serveur VPS envoyée automatiquement sur Telegram / Discord / WhatsApp / Email.
-   - Indicateurs visuels : 🟢 Nominal, 🟡 Avertissement (latence/4xx), 🔴 Critique (5xx/crashes/OOM).
+### 3. 🧠 Diagnostic Intelligent par IA (Smart Root-Cause Analysis)
+- Analyse et contextualisation des erreurs (scans de bots WordPress, saturation OOM, pannes DB PostgreSQL/Redis, exceptions Django/Node).
+- Traduction en français clair : **Cause exacte**, **Impact**, **Action recommandée**.
 
 ---
 
@@ -41,32 +41,36 @@ DokploySentinel est un microservice autonome et extensible composé de :
 
 ```
 DokploySentinel/
-├── src/                           # 🛡️ CODE DU HUB CENTRAL
+├── src/                           # 🛡️ CODE DU HUB CENTRAL 2.0
 │   ├── analyzers/
 │   │   ├── log_parser.py          # Analyseur de logs (HTTP texte, JSON, exceptions)
 │   │   └── metrics_aggregator.py  # Agrégateur des métriques multi-serveurs & ressources
 │   ├── collectors/
-│   │   ├── docker_collector.py    # Collecteur d'événements Docker local
+│   │   ├── docker_collector.py    # Collecteur Docker non-bloquant
 │   │   └── uptime_prober.py       # Sonde Uptime HTTP et certificats SSL
 │   ├── notifiers/
-│   │   ├── dispatcher.py          # Routage d'alertes multi-serveurs & anti-spam
-│   │   ├── telegram.py            # Notifier Telegram Bot (HTML sécurisé)
-│   │   ├── discord.py             # Notifier Discord Webhook (Rich Embeds colorés)
+│   │   ├── dispatcher.py          # Routage multi-serveurs & boutons interactifs
+│   │   ├── telegram.py            # Notifier Telegram Bot (HTML, Webhook & Keyboards)
+│   │   ├── discord.py             # Notifier Discord Webhook (Rich Embeds)
 │   │   ├── whatsapp.py            # Notifier WhatsApp (Evolution API / Webhook)
-│   │   └── email.py               # Notifier Email SMTP (Modèles HTML responsive)
+│   │   └── email.py               # Notifier Email SMTP (HTML responsive)
+│   ├── services/
+│   │   ├── mutes_manager.py       # Gestionnaire dynamique des sourdines (persistant)
+│   │   ├── ai_analyzer.py         # Moteur de diagnostic intelligent (Gemini & Heuristique)
+│   │   └── telegram_bot_handler.py# Cerveau interactif (Commandes & Callbacks)
 │   ├── scheduler/
-│   │   └── digest_job.py          # Planificateur périodique & surveillance Heartbeat
+│   │   └── digest_job.py          # Planificateur périodique & Heartbeats
 │   ├── api/
-│   │   └── webhooks.py            # Endpoints API (/agent/sync, /servers, /uptime, etc.)
+│   │   └── webhooks.py            # Endpoints API (/telegram/webhook, /mutes, /ai, /agent/sync)
 │   ├── config.py                  # Configuration Pydantic Settings
 │   └── main.py                    # Point d'entrée FastAPI
 ├── agent/                         # 🛰️ CODE DU SENTINEL-AGENT POUR VPS CLIENTS
-│   ├── agent.py                   # Script de collecte local et expédition sécurisée
-│   ├── Dockerfile                 # Image Docker ultra-légère Alpine (< 30 Mo)
+│   ├── agent.py                   # Micro-agent autonome pour VPS distant
+│   ├── Dockerfile                 # Image Docker Alpine (< 30 Mo)
 │   ├── docker-compose.agent.yml   # Déploiement 1-clic pour Dokploy distant
 │   ├── requirements.txt           # Dépendances minimales
 │   └── .env.agent.example         # Modèle de configuration pour VPS client
-├── tests/                         # Suite de 25 tests unitaires automatisés
+├── tests/                         # Suite complète de 39 tests unitaires automatisés
 ├── pytest.ini                     # Configuration Pytest
 ├── Dockerfile                     # Image Docker du Hub
 ├── docker-compose.yml             # Déploiement 1-clic du Hub
@@ -75,19 +79,20 @@ DokploySentinel/
 
 ---
 
-## 🛰️ Déployer le Sentinel-Agent sur un VPS Client (en 1 minute)
+## 🛰️ Déployer le Sentinel-Agent sur un VPS Client
 
 Sur le Dokploy de n'importe quel VPS distant :
 
-1. Créez une nouvelle application de type **Compose** (ou **Application**).
-2. Utilisez le fichier [`agent/docker-compose.agent.yml`](file:///f:/LEKYN/CLIENTS/DokploySentinel/agent/docker-compose.agent.yml) ou montez le volume `/var/run/docker.sock:/var/run/docker.sock:ro`.
-3. Renseignez les variables d'environnement dans Dokploy :
+1. Créez un nouveau service **Application** avec le dépôt GitHub `olouyabiHC/DokploySentinel-app` (branche `main`).
+2. Type de build : `Dockerfile` (Context: `agent`, Dockerfile: `agent/Dockerfile`).
+3. Volume : `/var/run/docker.sock:/var/run/docker.sock:ro`.
+4. Variables d'environnement :
    ```env
    SENTINEL_HUB_URL=https://sentinel.lekyn.com
    SENTINEL_API_KEY=dokploy-sentinel-secret-2026-secure-key
-   SERVER_NAME=VPS-Client-AutoEcole
+   SERVER_NAME=VPS-Client-Nom
    ```
-4. Cliquez sur **Deploy**. L'agent commence immédiatement à synchroniser le VPS avec votre Hub central !
+5. Cliquez sur **Deploy**.
 
 ---
 

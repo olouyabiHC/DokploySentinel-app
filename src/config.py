@@ -34,10 +34,17 @@ class Settings(BaseSettings):
     monitored_http_targets: str = ""
     uptime_probe_interval_seconds: int = 60
 
-    # Telegram
+    # Telegram Bot & Interactive Webhook
     telegram_enabled: bool = False
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
+    telegram_webhook_secret: str = "dokploy-telegram-webhook-secret-token"
+    telegram_webhook_url: Optional[str] = None
+
+    # AI Root-Cause Analysis (Gemini / OpenAI / Heuristic)
+    ai_analysis_enabled: bool = True
+    gemini_api_key: Optional[str] = None
+    ai_api_key: Optional[str] = None
 
     # Discord
     discord_enabled: bool = False

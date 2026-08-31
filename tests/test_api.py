@@ -14,6 +14,7 @@ async def test_health_endpoint():
         data = response.json()
         assert data["status"] == "ok"
         assert data["app"] == "DokploySentinel"
+        assert data["version"] == "2.0.0"
 
 
 @pytest.mark.asyncio
@@ -84,6 +85,60 @@ async def test_uptime_overview_endpoint():
         assert response.status_code == 200
         data = response.json()
         assert "targets" in data
+
+
+@pytest.mark.asyncio
+async def test_telegram_webhook_endpoint():
+    settings.debug = True
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        payload = {
+            "message": {
+                "text": "/help",
+                "chat": {"id": 123456789},
+                "from": {"username": "test_admin"},
+            }
+        }
+        response = await ac.post("/api/v1/telegram/webhook", json=payload)
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_mutes_rest_api():
+    settings.debug = True
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        # 1. Create Mute
+        post_resp = await ac.post("/api/v1/mutes", json={"pattern": "wordpress-test", "duration_minutes": 60})
+        assert post_resp.status_code == 200
+        assert post_resp.json()["status"] == "success"
+
+        # 2. Get Mutes
+        get_resp = await ac.get("/api/v1/mutes")
+        assert get_resp.status_code == 200
+        patterns = [m["pattern"] for m in get_resp.json()["active_mutes"]]
+        assert "wordpress-test" in patterns
+
+        # 3. Delete Mute
+        del_resp = await ac.delete("/api/v1/mutes/wordpress-test")
+        assert del_resp.status_code == 200
+        assert del_resp.json()["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_ai_diagnose_endpoint():
+    settings.debug = True
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        payload = {
+            "container_name": "wordpress-test",
+            "reason": "PHP Fatal Error",
+            "details": "PHP Fatal error: Uncaught Error: Undefined constant 'ABSPATH' in /var/www/html/wp-settings.php:34",
+        }
+        response = await ac.post("/api/v1/ai/diagnose", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        assert "diagnosis" in data
+        assert data["diagnosis"]["category"] == "BOT_SCANNER"
 
 
 @pytest.mark.asyncio

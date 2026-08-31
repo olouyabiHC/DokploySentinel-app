@@ -1,4 +1,4 @@
-"""Notification dispatcher handling immediate alerts, periodic digest formatting, and multi-server routing."""
+"""Notification dispatcher handling immediate alerts, interactive Telegram buttons, dynamic mutes, and multi-server routing."""
 
 import logging
 from datetime import datetime, timezone
@@ -10,6 +10,7 @@ from src.notifiers.telegram import TelegramNotifier
 from src.notifiers.discord import DiscordNotifier
 from src.notifiers.whatsapp import WhatsAppNotifier
 from src.notifiers.email import EmailNotifier
+from src.services.mutes_manager import mutes_manager
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,15 @@ class NotificationDispatcher:
         server_name: Optional[str] = None,
         bypass_cooldown: bool = False,
     ):
-        """Envoie une alerte critique immédiate sur tous les canaux actifs avec précision du VPS concerné."""
+        """Envoie une alerte critique immédiate avec boutons interactifs Telegram et filtrage dynamique par sourdine."""
         server = server_name or settings.server_name
+
+        # 1. Vérification du gestionnaire de sourdines dynamiques (Mutes)
+        if mutes_manager.is_muted(container_name, server):
+            logger.info(f"[MutesManager] Alerte ignorée pour [{server}] {container_name} (Règle de sourdine active).")
+            return
+
+        # 2. Vérification Anti-Spam (Cooldown)
         alert_key = f"{server}:{container_name}:{reason[:40]}"
         if not bypass_cooldown and self._is_throttled(alert_key):
             logger.warning(
@@ -58,7 +66,22 @@ class NotificationDispatcher:
 
         logger.warning(f"[Alert] Déclenchement alerte critique sur [{server}] {container_name} : {reason}")
 
-        # 1. Telegram (HTML)
+        # 3. Construction des boutons interactifs Telegram (Inline Keyboard)
+        short_target = container_name.split(".")[0]  # Raccourcit les noms Docker Swarm pour les callbacks
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "🔇 Muter 2h", "callback_data": f"mute:{short_target}:120"},
+                    {"text": "📋 Derniers logs", "callback_data": f"logs:{short_target}"},
+                ],
+                [
+                    {"text": "🔄 Redémarrer", "callback_data": f"restart_ask:{short_target}"},
+                    {"text": "🧠 Diagnostic IA", "callback_data": f"ai_rca:{short_target}"},
+                ],
+            ]
+        }
+
+        # 4. Telegram (HTML avec boutons interactifs)
         safe_server = TelegramNotifier.escape_html(server)
         safe_container = TelegramNotifier.escape_html(container_name)
         safe_reason = TelegramNotifier.escape_html(reason)
@@ -72,9 +95,9 @@ class NotificationDispatcher:
         )
         if safe_details:
             tg_text += f"\n📋 <b>Détails & Stacktrace :</b>\n<pre>{safe_details}</pre>\n"
-        await self.telegram.send_message(tg_text, parse_mode="HTML")
+        await self.telegram.send_message(tg_text, parse_mode="HTML", reply_markup=reply_markup)
 
-        # 2. Discord (Rich Embed)
+        # 5. Discord (Rich Embed)
         discord_fields = [
             {"name": "🌐 Serveur / VPS", "value": f"`{server}`", "inline": True},
             {"name": "📦 Conteneur", "value": f"`{container_name}`", "inline": True},
@@ -90,7 +113,7 @@ class NotificationDispatcher:
             fields=discord_fields,
         )
 
-        # 3. WhatsApp
+        # 6. WhatsApp
         wa_text = (
             f"🚨 *[ALERTE CRITIQUE DOKPLOY]* 🚨\n\n"
             f"🌐 *Serveur :* `{server}`\n"
@@ -102,7 +125,7 @@ class NotificationDispatcher:
             wa_text += f"\n📋 *Détails :*\n```{details[:500]}```\n"
         await self.whatsapp.send_message(wa_text)
 
-        # 4. Email
+        # 7. Email
         email_subject = f"🚨 [Dokploy Alert] [{server}] {reason} sur {container_name}"
         email_body_text = f"ALERTE DOKPLOY\n\nServeur: {server}\nConteneur: {container_name}\nIncident: {reason}\nDate: {now_str}\n\nDétails:\n{details}"
         email_body_html = EmailNotifier.build_alert_html(
@@ -195,6 +218,10 @@ class NotificationDispatcher:
             tg_message += f"\n🏢 <b>[{TelegramNotifier.escape_html(s_name)}]</b>\n"
 
             for name, stats in sorted(containers_map.items()):
+                # Ignorer si le conteneur est muté
+                if mutes_manager.is_muted(name, s_name):
+                    continue
+
                 error_rate = stats.error_5xx_rate_percent
                 median_lat = f"{stats.median_latency_ms}ms" if stats.median_latency_ms is not None else "N/A"
                 p95_lat = f"{stats.p95_latency_ms}ms" if stats.p95_latency_ms is not None else "N/A"
@@ -236,7 +263,16 @@ class NotificationDispatcher:
             f"💡 <b>État Global :</b> {'⚠️ ATTENTION REQUISE' if has_critical_issue else '✅ TOUS LES SERVEURS SONT NOMINAUX'}"
         )
 
-        await self.telegram.send_message(tg_message, parse_mode="HTML")
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "📊 Statut en direct", "callback_data": "cmd:status"},
+                    {"text": "🏢 Liste des VPS", "callback_data": "cmd:servers"},
+                ]
+            ]
+        }
+
+        await self.telegram.send_message(tg_message, parse_mode="HTML", reply_markup=reply_markup)
 
         # Discord
         await self.discord.send_embed(
@@ -251,7 +287,15 @@ class NotificationDispatcher:
         test_plain = "🧪 [DOKPLOY SENTINEL] — Test multi-serveurs réussi !"
 
         if channel in ("telegram", "all"):
-            results["telegram"] = await self.telegram.send_message(test_text, parse_mode="HTML")
+            reply_markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "✅ Test OK", "callback_data": "cmd:status"},
+                        {"text": "📖 Menu d'aide", "callback_data": "cmd:help"},
+                    ]
+                ]
+            }
+            results["telegram"] = await self.telegram.send_message(test_text, parse_mode="HTML", reply_markup=reply_markup)
         if channel in ("discord", "all"):
             results["discord"] = await self.discord.send_embed(
                 title="🧪 Test de Notification DokploySentinel",

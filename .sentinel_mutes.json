@@ -1,0 +1,11 @@
+[
+  {
+    "pattern": "bestlens-app",
+    "expires_at": "2026-08-31T17:24:50.111877+00:00",
+    "remaining_minutes": 59,
+    "reason": "Bouton Telegram cliqu\u00e9 par @admin_user",
+    "server_name": null,
+    "created_at": "2026-08-31T16:24:50.111899+00:00",
+    "is_permanent": false
+  }
+]

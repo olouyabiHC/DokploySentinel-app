@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import threading
 from typing import Dict, Optional, Set
 import docker
 
@@ -18,7 +19,7 @@ class DockerCollector:
         self.client: Optional[docker.DockerClient] = None
         self.running = False
         self._active_tasks: Set[asyncio.Task] = set()
-        self._last_log_timestamps: Dict[str, int] = {}
+        self._event_thread: Optional[threading.Thread] = None
 
     def connect(self) -> bool:
         try:
@@ -52,9 +53,16 @@ class DockerCollector:
         if not self.connect():
             return
 
-        # 1. Écoute des événements de cycle de vie (crash, restart, OOM, unhealthy)
-        event_task = asyncio.create_task(self._listen_docker_events())
-        self._active_tasks.add(event_task)
+        loop = asyncio.get_running_loop()
+
+        # 1. Écoute des événements de cycle de vie dans un thread dédié non-bloquant
+        self._event_thread = threading.Thread(
+            target=self._listen_docker_events_thread,
+            args=(loop,),
+            daemon=True,
+            name="DockerEventsThread",
+        )
+        self._event_thread.start()
 
         # 2. Surveillance des logs en continu
         log_task = asyncio.create_task(self._monitor_containers_logs())
@@ -71,16 +79,12 @@ class DockerCollector:
         self._active_tasks.clear()
         logger.info("[DockerCollector] Arrêté.")
 
-    async def _listen_docker_events(self):
-        """Surveille les événements Docker en temps réel (arrêt brutal, OOM, crash, unhealthy)."""
-        loop = asyncio.get_event_loop()
+    def _listen_docker_events_thread(self, loop: asyncio.AbstractEventLoop):
+        """Surveille les événements Docker dans un thread dédié pour ne jamais bloquer la boucle asyncio."""
+        logger.info("[DockerCollector] Thread d'écoute des événements Docker démarré.")
         while self.running:
             try:
-                events = await loop.run_in_executor(
-                    None,
-                    lambda: self.client.events(decode=True, filters={"type": "container"}),
-                )
-                for event in events:
+                for event in self.client.events(decode=True, filters={"type": "container"}):
                     if not self.running:
                         break
                     action = event.get("Action", "")
@@ -93,33 +97,45 @@ class DockerCollector:
 
                     # Détection OOMKilled
                     if action == "oom":
-                        await dispatcher.send_critical_alert(
-                            container_name=container_name,
-                            reason="💥 Out Of Memory (OOMKilled) — Dépassement critique de mémoire !",
-                            details=str(attributes),
+                        asyncio.run_coroutine_threadsafe(
+                            dispatcher.send_critical_alert(
+                                container_name=container_name,
+                                reason="💥 Out Of Memory (OOMKilled) — Dépassement critique de mémoire !",
+                                details=str(attributes),
+                                server_name=settings.server_name,
+                            ),
+                            loop,
                         )
                     # Détection arrêt anormal (crash / die avec exit code != 0)
                     elif action == "die":
                         exit_code = attributes.get("exitCode")
                         if exit_code and exit_code != "0":
-                            await dispatcher.send_critical_alert(
-                                container_name=container_name,
-                                reason=f"🛑 Arrêt anormal du conteneur (Exit Code: {exit_code})",
-                                details=f"Événement: {action} | Image: {attributes.get('image', 'N/A')}",
+                            asyncio.run_coroutine_threadsafe(
+                                dispatcher.send_critical_alert(
+                                    container_name=container_name,
+                                    reason=f"🛑 Arrêt anormal du conteneur (Exit Code: {exit_code})",
+                                    details=f"Événement: {action} | Image: {attributes.get('image', 'N/A')}",
+                                    server_name=settings.server_name,
+                                ),
+                                loop,
                             )
                     # Détection conteneur devenu malsain (Healthcheck Docker KO)
                     elif "health_status" in action and "unhealthy" in action:
-                        await dispatcher.send_critical_alert(
-                            container_name=container_name,
-                            reason="🩺 Conteneur passé à l'état Unhealthy (Échec du Healthcheck)",
-                            details=f"Événement: {action}",
+                        asyncio.run_coroutine_threadsafe(
+                            dispatcher.send_critical_alert(
+                                container_name=container_name,
+                                reason="🩺 Conteneur passé à l'état Unhealthy (Échec du Healthcheck)",
+                                details=f"Événement: {action}",
+                                server_name=settings.server_name,
+                            ),
+                            loop,
                         )
 
-            except asyncio.CancelledError:
-                break
             except Exception as e:
-                logger.error(f"[DockerCollector] Erreur boucle événements Docker : {e}")
-                await asyncio.sleep(5)
+                if self.running:
+                    logger.debug(f"[DockerCollector] Reconnexion au flux d'événements Docker : {e}")
+                    import time
+                    time.sleep(3)
 
     async def _monitor_containers_logs(self):
         """Scanne périodiquement les logs récents de chaque conteneur actif."""
@@ -131,7 +147,6 @@ class DockerCollector:
                     if not self.should_monitor_container(container.name):
                         continue
 
-                    cid = container.id
                     # On lit les logs depuis les 30 dernières secondes
                     raw_logs = await loop.run_in_executor(
                         None,
@@ -142,7 +157,11 @@ class DockerCollector:
                         if not line.strip():
                             continue
                         entry = LogParser.parse_line(line, container.name)
-                        metrics_aggregator.record(entry, latency_threshold_ms=settings.latency_alert_threshold_ms)
+                        metrics_aggregator.record(
+                            entry,
+                            latency_threshold_ms=settings.latency_alert_threshold_ms,
+                            server_name=settings.server_name,
+                        )
 
                         # Alerte immédiate si exception critique rencontrée
                         if entry.is_critical_exception:
@@ -150,6 +169,7 @@ class DockerCollector:
                                 container_name=container.name,
                                 reason="❌ Exception / Crash applicatif détecté dans les logs",
                                 details=entry.raw_line,
+                                server_name=settings.server_name,
                             )
 
             except asyncio.CancelledError:
@@ -169,7 +189,6 @@ class DockerCollector:
                     if not self.should_monitor_container(container.name):
                         continue
 
-                    # Récupérer l'état de santé
                     c_attrs = container.attrs or {}
                     c_state = c_attrs.get("State", {})
                     status = c_state.get("Status", "running")
@@ -189,6 +208,7 @@ class DockerCollector:
                         memory_mb=mem_mb,
                         status=status,
                         health=health_status,
+                        server_name=settings.server_name,
                     )
 
                     # Alerte proactive si saturation mémoire
@@ -197,6 +217,7 @@ class DockerCollector:
                             container_name=container.name,
                             reason=f"⚠️ Saturation Mémoire Élevée ({mem_percent}% / {round(mem_mb, 1)} MB)",
                             details=f"Seuil d'alerte défini à {settings.memory_alert_threshold_percent}%. Risque d'OOM imminent.",
+                            server_name=settings.server_name,
                         )
 
             except asyncio.CancelledError:
@@ -210,14 +231,12 @@ class DockerCollector:
     def _calculate_usage(stats: dict) -> tuple[float, float, float]:
         """Calcule le % CPU, % Mémoire et l'utilisation RAM en MB."""
         try:
-            # Calcul RAM
             memory_stats = stats.get("memory_stats", {})
             mem_usage = memory_stats.get("usage", 0)
             mem_limit = memory_stats.get("limit", 1)
             mem_mb = mem_usage / (1024 * 1024)
             mem_percent = round((mem_usage / mem_limit) * 100, 1) if mem_limit > 0 else 0.0
 
-            # Calcul CPU
             cpu_stats = stats.get("cpu_stats", {})
             precpu_stats = stats.get("precpu_stats", {})
             cpu_delta = cpu_stats.get("cpu_usage", {}).get("total_usage", 0) - precpu_stats.get("cpu_usage", {}).get("total_usage", 0)

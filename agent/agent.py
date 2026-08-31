@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import shutil
+import threading
 import docker
 import httpx
 
@@ -36,6 +37,7 @@ class SentinelAgent:
         self.running = False
         self._pending_logs = []
         self._pending_alerts = []
+        self._event_thread = None
 
     def connect(self) -> bool:
         try:
@@ -90,22 +92,25 @@ class SentinelAgent:
 
         logger.info(f"🛰️ Démarrage de l'agent sur [{SERVER_NAME}] ➔ Hub: {HUB_URL}")
 
-        # 1. Écoute continue des événements Docker (Crash, OOM, Unhealthy)
-        asyncio.create_task(self._listen_events())
+        loop = asyncio.get_running_loop()
+
+        # 1. Écoute continue des événements Docker dans un thread dédié
+        self._event_thread = threading.Thread(
+            target=self._listen_events_thread,
+            args=(loop,),
+            daemon=True,
+            name="AgentEventsThread",
+        )
+        self._event_thread.start()
 
         # 2. Boucle périodique de collecte et synchronisation
         asyncio.create_task(self._sync_loop())
 
-    async def _listen_events(self):
-        """Capte instantanément tout crash, arrêt anormal ou OOM."""
-        loop = asyncio.get_event_loop()
+    def _listen_events_thread(self, loop: asyncio.AbstractEventLoop):
+        """Capte instantanément tout crash, arrêt anormal ou OOM sans bloquer asyncio."""
         while self.running:
             try:
-                events = await loop.run_in_executor(
-                    None,
-                    lambda: self.docker_client.events(decode=True, filters={"type": "container"}),
-                )
-                for event in events:
+                for event in self.docker_client.events(decode=True, filters={"type": "container"}):
                     if not self.running:
                         break
                     action = event.get("Action", "")
@@ -125,7 +130,7 @@ class SentinelAgent:
                         }
                         self._pending_alerts.append(alert)
                         logger.warning(f"Alerte immédiate OOM détectée sur {c_name}")
-                        await self._send_sync_payload()
+                        asyncio.run_coroutine_threadsafe(self._send_sync_payload(), loop)
 
                     # Détection crash / die anormal
                     elif action == "die":
@@ -138,7 +143,7 @@ class SentinelAgent:
                             }
                             self._pending_alerts.append(alert)
                             logger.warning(f"Alerte immédiate Crash détectée sur {c_name} (Code {exit_code})")
-                            await self._send_sync_payload()
+                            asyncio.run_coroutine_threadsafe(self._send_sync_payload(), loop)
 
                     # Détection healthcheck unhealthy
                     elif "health_status" in action and "unhealthy" in action:
@@ -149,13 +154,12 @@ class SentinelAgent:
                         }
                         self._pending_alerts.append(alert)
                         logger.warning(f"Alerte immédiate Unhealthy détectée sur {c_name}")
-                        await self._send_sync_payload()
+                        asyncio.run_coroutine_threadsafe(self._send_sync_payload(), loop)
 
-            except asyncio.CancelledError:
-                break
             except Exception as e:
-                logger.error(f"Erreur écoute événements Docker : {e}")
-                await asyncio.sleep(5)
+                if self.running:
+                    import time
+                    time.sleep(3)
 
     async def _sync_loop(self):
         """Scanne les conteneurs et envoie le rapport consolidé au Hub toutes les N secondes."""
@@ -169,7 +173,7 @@ class SentinelAgent:
                     if not self.should_monitor(container.name):
                         continue
 
-                    # 1. Logs récents (30s)
+                    # 1. Logs récents
                     raw_logs = await loop.run_in_executor(
                         None,
                         lambda c=container: c.logs(since=SYNC_INTERVAL + 5, timestamps=False).decode(

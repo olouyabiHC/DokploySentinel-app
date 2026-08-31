@@ -1,7 +1,7 @@
-"""API Router for Webhooks, Health, Container Status, Direct Log Ingestion, and Notification Tests."""
+"""API Router for Webhooks, Multi-Server Agent Sync, Health, Container Status, and Uptime."""
 
 import logging
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
@@ -9,6 +9,7 @@ from src.config import settings
 from src.notifiers.dispatcher import dispatcher
 from src.analyzers.metrics_aggregator import metrics_aggregator
 from src.analyzers.log_parser import LogParser
+from src.collectors.uptime_prober import uptime_prober
 from src.scheduler.digest_job import digest_scheduler
 
 logger = logging.getLogger(__name__)
@@ -16,11 +17,46 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+# ── Modèles de Données Pydantic ───────────────────────────────────────────────
+
+class ContainerReport(BaseModel):
+    container_name: str
+    cpu_percent: float = 0.0
+    memory_percent: float = 0.0
+    memory_mb: float = 0.0
+    status: str = "running"
+    health: str = "healthy"
+
+
+class InstantAlertReport(BaseModel):
+    container_name: str
+    reason: str
+    details: str = ""
+
+
+class AgentSyncPayload(BaseModel):
+    server_name: str = Field(..., description="Nom du serveur VPS émetteur (ex: VPS-Client-A)")
+    host_cpu_percent: float = 0.0
+    host_memory_percent: float = 0.0
+    host_disk_percent: float = 0.0
+    containers: List[ContainerReport] = []
+    logs: List[str] = []
+    alerts: List[InstantAlertReport] = []
+
+
+class AgentHeartbeatPayload(BaseModel):
+    server_name: str
+    host_cpu_percent: float = 0.0
+    host_memory_percent: float = 0.0
+    host_disk_percent: float = 0.0
+
+
 class LogIngestRequest(BaseModel):
-    container_name: str = Field(..., description="Nom du conteneur ou service émetteur")
-    line: Optional[str] = Field(None, description="Ligne unique de log")
-    lines: Optional[List[str]] = Field(None, description="Liste de lignes de logs")
-    payload: Optional[Dict[str, Any]] = Field(None, description="Objet JSON brut pour les logs structurés")
+    container_name: str
+    server_name: Optional[str] = None
+    line: Optional[str] = None
+    lines: Optional[List[str]] = None
+    payload: Optional[Dict[str, Any]] = None
 
 
 def _verify_secret_key(secret: Optional[str]):
@@ -28,50 +64,159 @@ def _verify_secret_key(secret: Optional[str]):
         raise HTTPException(status_code=403, detail="Clé secrète invalide ou manquante")
 
 
+# ── Endpoints de Base & Santé ────────────────────────────────────────────────
+
 @router.get("/health")
 async def health_check():
-    """Health check endpoint pour vérifier l'état du microservice."""
+    """Health check endpoint pour vérifier l'état du microservice Hub."""
     return {
         "status": "ok",
         "app": settings.app_name,
         "env": settings.app_env,
-        "version": "1.0.0",
+        "server_name": settings.server_name,
+        "version": "1.1.0",
     }
 
 
+# ── Endpoints Multi-Serveurs & Synchronisation Agent ─────────────────────────
+
+@router.post("/agent/sync")
+async def agent_sync(
+    payload: AgentSyncPayload,
+    secret: Optional[str] = Header(None, alias="X-Secret-Key"),
+):
+    """
+    Endpoint de synchronisation périodique pour les Sentinel-Agents distants.
+    Ingère en lot : logs, métriques conteneurs, santé du VPS et alertes instantanées.
+    """
+    _verify_secret_key(secret)
+    s_name = payload.server_name
+
+    # 1. Enregistrer le battement de cœur et métriques hôte
+    metrics_aggregator.record_server_heartbeat(
+        server_name=s_name,
+        host_cpu=payload.host_cpu_percent,
+        host_memory=payload.host_memory_percent,
+        host_disk=payload.host_disk_percent,
+    )
+
+    # 2. Enregistrer les ressources conteneurs
+    for c in payload.containers:
+        metrics_aggregator.record_container_resources(
+            container_name=c.container_name,
+            cpu_percent=c.cpu_percent,
+            memory_percent=c.memory_percent,
+            memory_mb=c.memory_mb,
+            status=c.status,
+            health=c.health,
+            server_name=s_name,
+        )
+
+    # 3. Parser et enregistrer les logs
+    for line in payload.logs:
+        if not line.strip():
+            continue
+        entry = LogParser.parse_line(line, container_name="unknown")
+        metrics_aggregator.record(entry, latency_threshold_ms=settings.latency_alert_threshold_ms, server_name=s_name)
+
+        if entry.is_critical_exception:
+            await dispatcher.send_critical_alert(
+                container_name=entry.container_name,
+                reason="❌ Exception critique détectée dans les logs distants",
+                details=entry.raw_line,
+                server_name=s_name,
+            )
+
+    # 4. Traiter les alertes instantanées envoyées par l'agent (Crash / OOM)
+    for alert in payload.alerts:
+        await dispatcher.send_critical_alert(
+            container_name=alert.container_name,
+            reason=alert.reason,
+            details=alert.details,
+            server_name=s_name,
+        )
+
+    return {
+        "status": "success",
+        "server_name": s_name,
+        "processed_containers": len(payload.containers),
+        "processed_logs": len(payload.logs),
+        "processed_alerts": len(payload.alerts),
+    }
+
+
+@router.post("/agent/heartbeat")
+async def agent_heartbeat(
+    payload: AgentHeartbeatPayload,
+    secret: Optional[str] = Header(None, alias="X-Secret-Key"),
+):
+    """Signal de vie léger envoyé par les Sentinel-Agents distants."""
+    _verify_secret_key(secret)
+    metrics_aggregator.record_server_heartbeat(
+        server_name=payload.server_name,
+        host_cpu=payload.host_cpu_percent,
+        host_memory=payload.host_memory_percent,
+        host_disk=payload.host_disk_percent,
+    )
+    return {"status": "ok", "server_name": payload.server_name}
+
+
+@router.get("/servers")
+async def get_servers_overview():
+    """Retourne la liste de tous les serveurs VPS connectés et leur statut de santé."""
+    return {"servers": metrics_aggregator.get_servers_overview()}
+
+
+@router.get("/uptime")
+async def get_uptime_overview():
+    """Retourne l'état en direct de toutes les sondes HTTP et des certificats SSL."""
+    return {"targets": uptime_prober.get_overview()}
+
+
+# ── Endpoints Conteneurs & Stats ─────────────────────────────────────────────
+
 @router.get("/stats")
-async def get_live_stats():
-    """Retourne les métriques de trafic et de performance courantes en JSON."""
-    stats = metrics_aggregator.get_all_stats()
-    result = {}
-    for name, s in stats.items():
-        result[name] = {
-            "total_requests": s.total_requests,
-            "2xx": s.count_2xx,
-            "4xx": s.count_4xx,
-            "5xx": s.count_5xx,
-            "error_rate_5xx_percent": s.error_5xx_rate_percent,
-            "median_latency_ms": s.median_latency_ms,
-            "p95_latency_ms": s.p95_latency_ms,
-            "slow_requests_count": len(s.slow_requests),
-            "critical_exceptions_count": len(s.critical_exceptions),
-            "avg_cpu_percent": s.avg_cpu_percent,
-            "max_memory_percent": s.max_memory_percent,
-            "max_memory_mb": s.max_memory_mb,
-            "docker_status": s.docker_status,
-            "health_status": s.health_status,
-        }
-    return {"monitored_containers": len(result), "stats": result}
+async def get_live_stats(server: Optional[str] = Query(None, description="Filtrer par serveur VPS")):
+    """Retourne les métriques courantes regroupées par serveur."""
+    grouped = metrics_aggregator.get_stats_grouped_by_server()
+    if server:
+        grouped = {server: grouped.get(server, {})}
+
+    formatted = {}
+    for s_name, containers in grouped.items():
+        formatted[s_name] = {}
+        for c_name, s in containers.items():
+            formatted[s_name][c_name] = {
+                "total_requests": s.total_requests,
+                "2xx": s.count_2xx,
+                "4xx": s.count_4xx,
+                "5xx": s.count_5xx,
+                "error_rate_5xx_percent": s.error_5xx_rate_percent,
+                "median_latency_ms": s.median_latency_ms,
+                "p95_latency_ms": s.p95_latency_ms,
+                "slow_requests_count": len(s.slow_requests),
+                "critical_exceptions_count": len(s.critical_exceptions),
+                "avg_cpu_percent": s.avg_cpu_percent,
+                "max_memory_percent": s.max_memory_percent,
+                "max_memory_mb": s.max_memory_mb,
+                "docker_status": s.docker_status,
+                "health_status": s.health_status,
+            }
+
+    return {"servers_count": len(formatted), "stats": formatted}
 
 
 @router.get("/containers")
-async def get_containers_overview():
-    """Retourne la liste synthétique des conteneurs surveillés et leur état de santé."""
+async def get_containers_overview(server: Optional[str] = Query(None, description="Filtrer par serveur VPS")):
+    """Retourne la liste de tous les conteneurs surveillés à travers tous les VPS."""
     stats = metrics_aggregator.get_all_stats()
     overview = []
-    for name, s in stats.items():
+    for (s_name, c_name), s in stats.items():
+        if server and s_name != server:
+            continue
         overview.append({
-            "container_name": name,
+            "server_name": s_name,
+            "container_name": c_name,
             "status": s.docker_status,
             "health": s.health_status,
             "total_requests": s.total_requests,
@@ -87,10 +232,10 @@ async def get_containers_overview():
 
 @router.post("/digest/trigger")
 async def trigger_manual_digest(secret: Optional[str] = Header(None, alias="X-Secret-Key")):
-    """Déclenche manuellement l'envoi d'un digest consolidé sur les canaux actifs."""
+    """Déclenche manuellement l'envoi d'un digest consolidé multi-serveurs sur Telegram."""
     _verify_secret_key(secret)
     await digest_scheduler.execute_digest()
-    return {"status": "success", "message": "Digest généré et expédié avec succès"}
+    return {"status": "success", "message": "Digest multi-serveurs généré et expédié"}
 
 
 @router.post("/notifications/test")
@@ -120,11 +265,9 @@ async def ingest_logs(
     payload: LogIngestRequest,
     secret: Optional[str] = Header(None, alias="X-Secret-Key"),
 ):
-    """
-    Ingestion directe de logs applicatifs par HTTP.
-    Permet à une application tierce d'envoyer ses logs directement à DokploySentinel.
-    """
+    """Ingestion directe de logs applicatifs par HTTP."""
     _verify_secret_key(secret)
+    server_name = payload.server_name or settings.server_name
     container_name = payload.container_name
 
     raw_lines: List[str] = []
@@ -137,37 +280,34 @@ async def ingest_logs(
         raw_lines.append(json.dumps(payload.payload))
 
     if not raw_lines:
-        raise HTTPException(status_code=400, detail="Aucun contenu de log fourni")
-
-    processed_count = 0
-    errors_detected = 0
+        raise HTTPException(status_code=400, detail="Aucun log fourni")
 
     for line in raw_lines:
         entry = LogParser.parse_line(line, container_name)
-        metrics_aggregator.record(entry, latency_threshold_ms=settings.latency_alert_threshold_ms)
-        processed_count += 1
+        metrics_aggregator.record(entry, latency_threshold_ms=settings.latency_alert_threshold_ms, server_name=server_name)
 
         if entry.is_critical_exception:
-            errors_detected += 1
             await dispatcher.send_critical_alert(
                 container_name=container_name,
-                reason="❌ Exception critique reçue via Ingestion de Logs HTTP",
+                reason="❌ Exception critique reçue par Ingestion HTTP",
                 details=entry.raw_line,
+                server_name=server_name,
             )
 
     return {
         "status": "success",
+        "server_name": server_name,
         "container_name": container_name,
-        "processed_lines": processed_count,
-        "errors_detected": errors_detected,
+        "processed_lines": len(raw_lines),
     }
 
 
 @router.post("/webhooks/dokploy")
-async def dokploy_webhook(request: Request):
-    """
-    Réception des webhooks Dokploy (déploiements, arrêts, alertes de build).
-    """
+async def dokploy_webhook(
+    request: Request,
+    server: Optional[str] = Query(None, description="Nom du serveur Dokploy"),
+):
+    """Réception des webhooks de déploiement de n'importe quel Dokploy (local ou distant)."""
     try:
         payload: Dict[str, Any] = await request.json()
     except Exception:
@@ -176,15 +316,16 @@ async def dokploy_webhook(request: Request):
     event_type = payload.get("event") or payload.get("type") or "Dokploy Event"
     title = payload.get("title") or payload.get("name") or "Application Dokploy"
     description = payload.get("description") or payload.get("message") or str(payload)
+    srv_name = server or settings.server_name
 
-    logger.info(f"[Dokploy Webhook] Événement reçu : {event_type} — {title}")
+    logger.info(f"[Dokploy Webhook] [{srv_name}] Événement : {event_type} — {title}")
 
-    # Relayer l'alerte sur Telegram / Discord / WhatsApp / Email si anomalie
     if any(keyword in str(payload).lower() for keyword in ["fail", "error", "crash", "stop", "unhealthy", "oom"]):
         await dispatcher.send_critical_alert(
             container_name=title,
             reason=f"⚠️ Notification Webhook Dokploy : {event_type}",
             details=description,
+            server_name=srv_name,
         )
 
-    return {"status": "received", "event": event_type}
+    return {"status": "received", "server": srv_name, "event": event_type}

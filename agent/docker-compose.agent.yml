@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  sentinel-agent:
+    build: .
+    container_name: sentinel-agent
+    restart: unless-stopped
+    volumes:
+      # Accès au socket Docker de l'hôte distant en lecture seule
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - SENTINEL_HUB_URL=${SENTINEL_HUB_URL:-https://sentinel.lekyn.com}
+      - SENTINEL_API_KEY=${SENTINEL_API_KEY}
+      - SERVER_NAME=${SERVER_NAME:-VPS-Client}
+      - SYNC_INTERVAL_SECONDS=20
+      - IGNORED_CONTAINER_PATTERNS=pgbouncer,postgres,redis,dokploy-traefik,dokploy-sentinel,sentinel-agent

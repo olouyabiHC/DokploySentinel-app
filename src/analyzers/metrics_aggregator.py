@@ -1,8 +1,8 @@
-"""Aggregates log metrics, performance, and resource stats per container."""
+"""Aggregates log metrics, performance, and resource stats per container and per server/VPS."""
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 import statistics
 
@@ -10,8 +10,20 @@ from src.analyzers.log_parser import ParsedLogEntry
 
 
 @dataclass
+class ServerInfo:
+    server_name: str
+    last_heartbeat: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    host_cpu_percent: float = 0.0
+    host_memory_percent: float = 0.0
+    host_disk_percent: float = 0.0
+    status: str = "online"
+    alerted_offline: bool = False
+
+
+@dataclass
 class ContainerStats:
     container_name: str
+    server_name: str = "local"
     first_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_seen: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     total_requests: int = 0
@@ -67,7 +79,6 @@ class ContainerStats:
         status: str = "running",
         health: str = "healthy",
     ):
-        """Enregistre un échantillon de ressources CPU et Mémoire."""
         self.cpu_samples.append(cpu_percent)
         self.memory_samples.append(memory_percent)
         if memory_mb > self.max_memory_mb:
@@ -110,15 +121,22 @@ class ContainerStats:
 
 class MetricsAggregator:
     def __init__(self):
-        self._stats: Dict[str, ContainerStats] = defaultdict(lambda: ContainerStats(container_name=""))
+        # Clé composite: (server_name, container_name) -> ContainerStats
+        self._stats: Dict[Tuple[str, str], ContainerStats] = {}
+        # Suivi de la santé globale des serveurs connectés
+        self._servers: Dict[str, ServerInfo] = {}
 
-    def get_or_create(self, container_name: str) -> ContainerStats:
-        if container_name not in self._stats:
-            self._stats[container_name] = ContainerStats(container_name=container_name)
-        return self._stats[container_name]
+    def get_or_create(self, container_name: str, server_name: str = "local") -> ContainerStats:
+        key = (server_name, container_name)
+        if key not in self._stats:
+            self._stats[key] = ContainerStats(container_name=container_name, server_name=server_name)
+        # Enregistrer aussi le serveur s'il n'est pas encore répertorié
+        if server_name not in self._servers:
+            self._servers[server_name] = ServerInfo(server_name=server_name)
+        return self._stats[key]
 
-    def record(self, entry: ParsedLogEntry, latency_threshold_ms: float = 2000.0):
-        stats = self.get_or_create(entry.container_name)
+    def record(self, entry: ParsedLogEntry, latency_threshold_ms: float = 2000.0, server_name: str = "local"):
+        stats = self.get_or_create(entry.container_name, server_name=server_name)
         stats.record_entry(entry, latency_threshold_ms)
 
     def record_container_resources(
@@ -129,19 +147,65 @@ class MetricsAggregator:
         memory_mb: float,
         status: str = "running",
         health: str = "healthy",
+        server_name: str = "local",
     ):
-        stats = self.get_or_create(container_name)
+        stats = self.get_or_create(container_name, server_name=server_name)
         stats.record_resources(cpu_percent, memory_percent, memory_mb, status, health)
 
-    def get_all_stats(self) -> Dict[str, ContainerStats]:
+    def record_server_heartbeat(
+        self,
+        server_name: str,
+        host_cpu: float = 0.0,
+        host_memory: float = 0.0,
+        host_disk: float = 0.0,
+    ):
+        """Enregistre le battement de cœur (heartbeat) et les métriques globales d'un VPS."""
+        if server_name not in self._servers:
+            self._servers[server_name] = ServerInfo(server_name=server_name)
+        srv = self._servers[server_name]
+        srv.last_heartbeat = datetime.now(timezone.utc)
+        srv.host_cpu_percent = host_cpu
+        srv.host_memory_percent = host_memory
+        srv.host_disk_percent = host_disk
+        srv.status = "online"
+        srv.alerted_offline = False
+
+    def get_all_stats(self) -> Dict[Tuple[str, str], ContainerStats]:
         return dict(self._stats)
 
+    def get_stats_grouped_by_server(self) -> Dict[str, Dict[str, ContainerStats]]:
+        """Retourne les métriques regroupées par nom de serveur."""
+        grouped: Dict[str, Dict[str, ContainerStats]] = defaultdict(dict)
+        for (server_name, container_name), stats in self._stats.items():
+            grouped[server_name][container_name] = stats
+        return dict(grouped)
+
+    def get_servers_overview(self) -> List[Dict]:
+        """Retourne un état synthétique de tous les serveurs VPS répertoriés."""
+        overview = []
+        now = datetime.now(timezone.utc)
+        for s_name, srv in self._servers.items():
+            # Compter les conteneurs associés
+            containers_count = sum(1 for (sn, _) in self._stats.keys() if sn == s_name)
+            elapsed_sec = (now - srv.last_heartbeat).total_seconds()
+            overview.append({
+                "server_name": s_name,
+                "status": "online" if elapsed_sec < 180 else "offline",
+                "last_heartbeat": srv.last_heartbeat.isoformat(),
+                "seconds_since_last_seen": int(elapsed_sec),
+                "host_cpu_percent": srv.host_cpu_percent,
+                "host_memory_percent": srv.host_memory_percent,
+                "host_disk_percent": srv.host_disk_percent,
+                "containers_count": containers_count,
+            })
+        return overview
+
     def reset_stats(self):
-        """Réinitialise les métriques de trafic pour le prochain cycle de digest."""
-        # On garde les conteneurs connus mais on vide les accumulateurs de trafic
-        for name, s in list(self._stats.items()):
-            self._stats[name] = ContainerStats(
-                container_name=name,
+        """Réinitialise les accumulateurs de trafic pour le prochain cycle de digest."""
+        for (server_name, container_name), s in list(self._stats.items()):
+            self._stats[(server_name, container_name)] = ContainerStats(
+                container_name=container_name,
+                server_name=server_name,
                 docker_status=s.docker_status,
                 health_status=s.health_status,
             )

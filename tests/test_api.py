@@ -22,7 +22,7 @@ async def test_stats_endpoint():
         response = await ac.get("/api/v1/stats")
         assert response.status_code == 200
         data = response.json()
-        assert "monitored_containers" in data
+        assert "servers_count" in data
         assert "stats" in data
 
 
@@ -37,8 +37,58 @@ async def test_containers_overview_endpoint():
 
 
 @pytest.mark.asyncio
+async def test_agent_sync_endpoint():
+    settings.debug = True
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        payload = {
+            "server_name": "VPS-Client-AutoEcole",
+            "host_cpu_percent": 15.2,
+            "host_memory_percent": 42.0,
+            "host_disk_percent": 35.0,
+            "containers": [
+                {
+                    "container_name": "api-autoecole",
+                    "cpu_percent": 5.0,
+                    "memory_percent": 20.0,
+                    "memory_mb": 128.0,
+                    "status": "running",
+                    "health": "healthy",
+                }
+            ],
+            "logs": [
+                '127.0.0.1 - - [31/Aug/2026:12:00:00 +0100] "GET /api/v1/lessons HTTP/1.1" 200 122 "ref" "ua" 45',
+            ],
+            "alerts": [],
+        }
+        response = await ac.post("/api/v1/agent/sync", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        assert data["server_name"] == "VPS-Client-AutoEcole"
+        assert data["processed_containers"] == 1
+
+
+@pytest.mark.asyncio
+async def test_servers_overview_endpoint():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        response = await ac.get("/api/v1/servers")
+        assert response.status_code == 200
+        data = response.json()
+        assert "servers" in data
+
+
+@pytest.mark.asyncio
+async def test_uptime_overview_endpoint():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        response = await ac.get("/api/v1/uptime")
+        assert response.status_code == 200
+        data = response.json()
+        assert "targets" in data
+
+
+@pytest.mark.asyncio
 async def test_logs_ingest_endpoint():
-    settings.debug = True  # Permet de bypasser la clé secrète en mode test
+    settings.debug = True
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         payload = {
             "container_name": "direct-app",

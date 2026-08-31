@@ -1,33 +1,38 @@
-"""Configuration module using Pydantic Settings."""
+"""Configuration module using Pydantic Settings for DokploySentinel Hub & Agent."""
 
 from typing import List, Optional
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # Application
+    # Application & Hub Identifiers
     app_name: str = "DokploySentinel"
     app_env: str = "production"
+    server_name: str = "VPS-Principal-Lekyn"
     debug: bool = False
     server_host: str = "0.0.0.0"
     server_port: int = 8000
-    secret_key: str = "change-this-secret-key"
+    secret_key: str = "dokploy-sentinel-secret-2026-secure-key"
 
-    # Docker & Dokploy
+    # Docker & Dokploy Local
     docker_socket_path: str = "unix://var/run/docker.sock"
     monitored_container_patterns: str = ""
-    ignored_container_patterns: str = "pgbouncer,postgres,redis,dokploy-traefik"
+    ignored_container_patterns: str = "pgbouncer,postgres,redis,dokploy-traefik,dokploy-sentinel"
 
-    # Periodic Digest & Thresholds
+    # Periodic Digest & Alert Thresholds
     digest_interval_hours: int = 3
     latency_alert_threshold_ms: int = 2000
     error_5xx_rate_threshold_percent: float = 5.0
     memory_alert_threshold_percent: float = 90.0
     cpu_alert_threshold_percent: float = 95.0
     alert_cooldown_seconds: int = 300
+
+    # Multi-Server Agent & Uptime Probing
+    agent_heartbeat_timeout_seconds: int = 180
+    monitored_http_targets: str = ""
+    uptime_probe_interval_seconds: int = 60
 
     # Telegram
     telegram_enabled: bool = False
@@ -67,6 +72,12 @@ class Settings(BaseSettings):
         if not self.ignored_container_patterns:
             return []
         return [p.strip().lower() for p in self.ignored_container_patterns.split(",") if p.strip()]
+
+    @property
+    def http_targets_list(self) -> List[str]:
+        if not self.monitored_http_targets:
+            return []
+        return [url.strip() for url in self.monitored_http_targets.split(",") if url.strip()]
 
 
 settings = Settings()

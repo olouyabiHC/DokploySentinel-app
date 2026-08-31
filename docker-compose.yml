@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  sentinel:
+    build: .
+    container_name: dokploy-sentinel
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      # Accès au socket Docker de l'hôte en lecture seule (ro) pour surveiller les conteneurs Dokploy
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.sentinel.rule=Host(`sentinel.votre-domaine.com`)"
+      - "traefik.http.routers.sentinel.entrypoints=websecure"
+      - "traefik.http.routers.sentinel.tls.certresolver=letsencrypt"
+      - "traefik.http.services.sentinel.loadbalancer.server.port=8000"

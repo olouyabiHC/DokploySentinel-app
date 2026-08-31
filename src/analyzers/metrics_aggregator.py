@@ -1,4 +1,4 @@
-"""Aggregates log metrics per container over time for periodic digest generation."""
+"""Aggregates log metrics, performance, and resource stats per container."""
 
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -22,6 +22,11 @@ class ContainerStats:
     latencies_ms: List[float] = field(default_factory=list)
     critical_exceptions: List[str] = field(default_factory=list)
     slow_requests: List[Dict] = field(default_factory=list)
+    cpu_samples: List[float] = field(default_factory=list)
+    memory_samples: List[float] = field(default_factory=list)
+    max_memory_mb: float = 0.0
+    docker_status: str = "running"
+    health_status: str = "healthy"
 
     def record_entry(self, entry: ParsedLogEntry, latency_threshold_ms: float = 2000.0):
         self.last_seen = datetime.now(timezone.utc)
@@ -51,9 +56,24 @@ class ContainerStats:
 
         if entry.is_critical_exception and entry.error_message:
             if entry.error_message not in self.critical_exceptions:
-                # Conserver au maximum les 15 dernières exceptions uniques
                 if len(self.critical_exceptions) < 15:
                     self.critical_exceptions.append(entry.error_message)
+
+    def record_resources(
+        self,
+        cpu_percent: float,
+        memory_percent: float,
+        memory_mb: float,
+        status: str = "running",
+        health: str = "healthy",
+    ):
+        """Enregistre un échantillon de ressources CPU et Mémoire."""
+        self.cpu_samples.append(cpu_percent)
+        self.memory_samples.append(memory_percent)
+        if memory_mb > self.max_memory_mb:
+            self.max_memory_mb = round(memory_mb, 1)
+        self.docker_status = status
+        self.health_status = health
 
     @property
     def error_5xx_rate_percent(self) -> float:
@@ -75,6 +95,18 @@ class ContainerStats:
         idx = int(len(sorted_lat) * 0.95)
         return round(sorted_lat[min(idx, len(sorted_lat) - 1)], 1)
 
+    @property
+    def avg_cpu_percent(self) -> Optional[float]:
+        if not self.cpu_samples:
+            return None
+        return round(sum(self.cpu_samples) / len(self.cpu_samples), 1)
+
+    @property
+    def max_memory_percent(self) -> Optional[float]:
+        if not self.memory_samples:
+            return None
+        return round(max(self.memory_samples), 1)
+
 
 class MetricsAggregator:
     def __init__(self):
@@ -89,12 +121,30 @@ class MetricsAggregator:
         stats = self.get_or_create(entry.container_name)
         stats.record_entry(entry, latency_threshold_ms)
 
+    def record_container_resources(
+        self,
+        container_name: str,
+        cpu_percent: float,
+        memory_percent: float,
+        memory_mb: float,
+        status: str = "running",
+        health: str = "healthy",
+    ):
+        stats = self.get_or_create(container_name)
+        stats.record_resources(cpu_percent, memory_percent, memory_mb, status, health)
+
     def get_all_stats(self) -> Dict[str, ContainerStats]:
         return dict(self._stats)
 
     def reset_stats(self):
-        """Réinitialise les statistiques pour le prochain cycle de digest."""
-        self._stats.clear()
+        """Réinitialise les métriques de trafic pour le prochain cycle de digest."""
+        # On garde les conteneurs connus mais on vide les accumulateurs de trafic
+        for name, s in list(self._stats.items()):
+            self._stats[name] = ContainerStats(
+                container_name=name,
+                docker_status=s.docker_status,
+                health_status=s.health_status,
+            )
 
 
 metrics_aggregator = MetricsAggregator()

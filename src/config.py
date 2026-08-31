@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     digest_interval_hours: int = 3
     latency_alert_threshold_ms: int = 2000
     error_5xx_rate_threshold_percent: float = 5.0
+    memory_alert_threshold_percent: float = 90.0
+    cpu_alert_threshold_percent: float = 95.0
+    alert_cooldown_seconds: int = 300
 
     # Telegram
     telegram_enabled: bool = False
@@ -48,6 +51,8 @@ class Settings(BaseSettings):
     smtp_port: int = 587
     smtp_user: Optional[str] = None
     smtp_password: Optional[str] = None
+    smtp_use_tls: bool = True
+    smtp_use_ssl: bool = False
     email_from: Optional[str] = None
     email_to: Optional[str] = None
 

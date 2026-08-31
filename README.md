@@ -8,22 +8,35 @@ DokploySentinel est un microservice autonome conçu pour surveiller en continu l
 
 ## 🌟 Fonctionnalités Principales
 
-1. **Surveillance des Logs en Temps Réel :**
+1. **Surveillance des Logs & Formats Multiples :**
    - Écoute automatique des conteneurs via le socket Docker (`/var/run/docker.sock`).
+   - Parsing automatique des formats texte (Nginx, Traefik, Apache, Gunicorn, Uvicorn, Django) et **JSON structuré** (Winston, Pino, Structlog, Zap).
    - Détection des codes d'erreurs HTTP (`500`, `502`, `504`, `429`).
    - Détection des latences anormales et requêtes lentes (> 2000 ms).
-   - Détection des traces d'erreurs critiques (`Traceback`, `Fatal error`, `panic`, `OOMKilled`).
+   - Détection des traces d'erreurs critiques (`Traceback`, `Fatal error`, `panic`, `OOMKilled`, échecs DB).
 
-2. **Alertes Immédiates en Temps Réel :**
-   - Notification instantanée lors d'un crash de conteneur, dépassement de mémoire (OOM) ou exception critique.
+2. **Surveillance Proactive des Ressources (CPU & RAM) :**
+   - Échantillonnage en direct de l'utilisation CPU et Mémoire par conteneur.
+   - Alertes préventives en cas de saturation de RAM (> 90%) pour anticiper les OOM.
+   - Suivi des statuts des healthchecks Docker (`healthy` / `unhealthy`).
 
-3. **Rapport de Santé Périodique (Digest toutes les 2h ou 3h) :**
-   - Synthèse consolidée de tous vos projets envoyée automatiquement sur **Telegram**, **Discord**, **WhatsApp** ou **Email**.
-   - Indicateurs visuels : 🟢 Nominal, 🟡 Avertissement (latence/4xx), 🔴 Critique (5xx/crashes).
-   - Statistiques complètes : requêtes totales, taux de succès, latence médiane et p95.
+3. **Alertes Immédiates & Protection Anti-Spam :**
+   - Notification instantanée en cas de crash (`die`), dépassement de mémoire (`oom`), conteneur `unhealthy` ou exception critique.
+   - Système de cooldown / anti-flood configurable (`ALERT_COOLDOWN_SECONDS`) pour éviter d'être submergé en cas de crash loop.
 
-4. **Récepteur de Webhooks Dokploy :**
-   - Endpoint `/api/v1/webhooks/dokploy` pour recevoir et relayer les notifications de déploiement Dokploy.
+4. **Rapport de Santé Périodique (Digest toutes les 2h ou 3h) :**
+   - Synthèse consolidée de tous vos projets envoyée automatiquement sur **Telegram**, **Discord**, **WhatsApp** et **Email (SMTP HTML)**.
+   - Indicateurs visuels : 🟢 Nominal, 🟡 Avertissement (latence/4xx), 🔴 Critique (5xx/crashes/OOM).
+   - Statistiques complètes : requêtes totales, taux de succès, latence médiane et p95, charge CPU & RAM.
+
+5. **API REST & Ingestion Directe :**
+   - `/api/v1/health` : Statut du service.
+   - `/api/v1/stats` : Métriques consolidées en direct.
+   - `/api/v1/containers` : État détaillé de tous les conteneurs surveillés.
+   - `/api/v1/notifications/test` : Test immédiat de chaque canal de notification.
+   - `/api/v1/logs/ingest` : Ingestion directe de logs applicatifs par HTTP.
+   - `/api/v1/webhooks/dokploy` : Récepteur de notifications de déploiement Dokploy.
+   - `/api/v1/digest/trigger` : Déclenchement manuel d'un digest.
 
 ---
 
@@ -33,25 +46,28 @@ DokploySentinel est un microservice autonome conçu pour surveiller en continu l
 DokploySentinel/
 ├── src/
 │   ├── analyzers/
-│   │   ├── log_parser.py          # Analyseur de lignes de logs (HTTP, erreurs, latences)
-│   │   └── metrics_aggregator.py  # Agrégateur des métriques par conteneur
+│   │   ├── log_parser.py          # Analyseur de logs (HTTP texte, JSON, exceptions)
+│   │   └── metrics_aggregator.py  # Agrégateur des métriques, latences & ressources
 │   ├── collectors/
-│   │   └── docker_collector.py    # Collecteur d'événements et logs Docker Socket
+│   │   └── docker_collector.py    # Collecteur d'événements Docker, stats CPU/RAM & logs
 │   ├── notifiers/
-│   │   ├── dispatcher.py          # Formattage et routage des alertes/digests
-│   │   ├── telegram.py            # Notifier Telegram Bot
-│   │   └── discord.py             # Notifier Discord Webhook
+│   │   ├── dispatcher.py          # Formattage multi-canal, routage & anti-spam
+│   │   ├── telegram.py            # Notifier Telegram Bot (HTML sécurisé)
+│   │   ├── discord.py             # Notifier Discord Webhook (Rich Embeds colorés)
+│   │   ├── whatsapp.py            # Notifier WhatsApp (Evolution API / Webhook)
+│   │   └── email.py               # Notifier Email SMTP (Modèles HTML responsive)
 │   ├── scheduler/
 │   │   └── digest_job.py          # Planificateur périodique (APScheduler)
 │   ├── api/
-│   │   └── webhooks.py            # Endpoints Webhook, Health, Stats & Trigger manuel
+│   │   └── webhooks.py            # Endpoints API, Ingestion, Tests & Dokploy Webhooks
 │   ├── config.py                  # Configuration Pydantic Settings
 │   └── main.py                    # Point d'entrée FastAPI
-├── tests/                         # Tests unitaires automatisés
+├── tests/                         # Suite de tests unitaires automatisés
+├── pytest.ini                     # Configuration Pytest
 ├── Dockerfile                     # Image Docker optimisée
 ├── docker-compose.yml             # Déploiement 1-clic Dokploy
 ├── requirements.txt               # Dépendances Python
-└── .env.example                   # Exemple de configuration
+└── .env.example                   # Modèle de configuration des variables
 ```
 
 ---
@@ -61,10 +77,10 @@ DokploySentinel/
 ### 1. Configuration Locale
 
 ```bash
-# Cloner ou ouvrir le projet
+# Accéder au dossier
 cd F:\LEKYN\CLIENTS\DokploySentinel
 
-# Créer l'environnement virtuel
+# Créer et activer l'environnement virtuel
 python -m venv .venv
 .venv\Scripts\activate   # (Sur Windows) ou source .venv/bin/activate (Sur Linux)
 
@@ -86,7 +102,7 @@ L'interface interactive Swagger est disponible sur : `http://localhost:8000/docs
 
 1. Dans Dokploy, créez une nouvelle application de type **Compose** ou **Dockerfile**.
 2. Renseignez les variables d'environnement dans l'onglet **Environment** de Dokploy (copiez depuis `.env.example`).
-3. Activez le volume de lecture seule pour le socket Docker :
+3. Montez le volume du socket Docker en lecture seule :
    ```yaml
    volumes:
      - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -95,21 +111,8 @@ L'interface interactive Swagger est disponible sur : `http://localhost:8000/docs
 
 ---
 
-## 🔔 Configuration des Notifications Telegram
-
-1. Créez un bot via [@BotFather](https://t.me/BotFather) sur Telegram et récupérez le `TELEGRAM_BOT_TOKEN`.
-2. Créez un canal ou groupe privé, ajoutez le bot en tant qu'administrateur.
-3. Récupérez le `TELEGRAM_CHAT_ID` et renseignez-les dans `.env` :
-   ```env
-   TELEGRAM_ENABLED=true
-   TELEGRAM_BOT_TOKEN=123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ
-   TELEGRAM_CHAT_ID=-1001234567890
-   ```
-
----
-
-## 🧪 Lancer les Tests
+## 🧪 Lancer la Suite de Tests
 
 ```bash
-pytest tests/ -v
+.venv\Scripts\pytest.exe -v
 ```
